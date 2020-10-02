@@ -15,8 +15,9 @@ const (
 
 const (
 	HEADER_LENGTH           = 8
-	RESP_PERS_MREQ_D_LENGTH = 4
-	REQ_PERS_MREQ_MD_LENGTH = 5
+	HEADER_TAIL_LENGTH      = 2
+	RES_PERS_MREG_D_LENGTH  = 4 // Data
+	REQ_PERS_MREG_MD_LENGTH = 5 // Metadata
 
 	CMD_PERSET_M_REG = 0x10
 	CMD_READ_HOL_REG = 0x03
@@ -38,7 +39,7 @@ type RequestPresetMReg struct {
 	addr int16
 	rcnt int16
 	leng byte
-	data []int16
+	data []byte
 }
 
 type RequestReadHReg struct {
@@ -56,7 +57,7 @@ type ResponsePresetMReg struct {
 type ResponseReadHReg struct {
 	head PDUHeader
 	leng byte
-	data []int16
+	data []byte
 }
 
 func joinBytes(buf []byte) int16 {
@@ -104,19 +105,13 @@ func parsePersetMReg(header PDUHeader, buf []byte) RequestPresetMReg {
 	request.addr = joinBytes(buf[0:])
 	request.rcnt = joinBytes(buf[2:])
 	request.leng = buf[4]
-	request.data = make([]int16, request.rcnt)
-	rawData := buf[REQ_PERS_MREQ_MD_LENGTH : request.leng+REQ_PERS_MREQ_MD_LENGTH]
-
-	var i int16
-	for i = 0; i < request.rcnt; i++ {
-		request.data[i] = joinBytes(rawData[i*2:])
-	}
+	request.data = buf[REQ_PERS_MREG_MD_LENGTH : request.leng+REQ_PERS_MREG_MD_LENGTH]
 
 	return request
 }
 
 func serilizePersetMReg(resp ResponsePresetMReg) []byte {
-	buf := make([]byte, HEADER_LENGTH+RESP_PERS_MREQ_D_LENGTH)
+	buf := make([]byte, HEADER_LENGTH+RES_PERS_MREG_D_LENGTH)
 	copy(buf, serializeHeader(resp.head))
 	splitBytes(buf[8:], resp.addr)
 	splitBytes(buf[10:], resp.amnt)
@@ -133,21 +128,23 @@ func parseReadHReg(header PDUHeader, buf []byte) RequestReadHReg {
 }
 
 func serializeReadHReg(resp ResponseReadHReg) []byte {
-	buf := make([]byte, HEADER_LENGTH+resp.leng+1)
+	buf := make([]byte, HEADER_LENGTH+1+resp.leng)
 	copy(buf, serializeHeader(resp.head))
-	//splitBytes(buf[8:], resp.leng)
-	//splitBytes(buf[10:], resp.amnt)
+	buf[HEADER_LENGTH] = resp.leng
+	copy(buf[HEADER_LENGTH+1:], resp.data)
+
 	return buf
 }
 
 func handlePersetMReg(request RequestPresetMReg) ResponsePresetMReg {
 	var response ResponsePresetMReg
 	response.head = request.head
+	response.head.leng = HEADER_TAIL_LENGTH + RES_PERS_MREG_D_LENGTH
 
 	var i int16
 	for i = 0; i < request.rcnt; i++ {
 		addr := request.addr + i
-		Storage[addr] = request.data[i]
+		Storage[addr] = joinBytes(request.data[i*2:])
 		Timeouts[addr] = time.Now()
 	}
 
@@ -157,8 +154,29 @@ func handlePersetMReg(request RequestPresetMReg) ResponsePresetMReg {
 	return response
 }
 
-func handleReadHReg() {
+func handleReadHReg(request RequestReadHReg) ResponseReadHReg {
+	var response ResponseReadHReg
+	response.head = request.head
+	response.head.leng = HEADER_TAIL_LENGTH + 1
+	var data = make([]byte, request.rcnt*2)
 
+	var i int16
+	for i = 0; i < request.rcnt; i++ {
+		elem, ok := Storage[i]
+		if ok {
+			splitBytes(data[i*2:], elem)
+		} else {
+			//response.head.metd |= 0x80
+			//response.data = make()
+		}
+
+	}
+
+	response.head.leng += request.rcnt * 2
+	response.leng = byte(request.rcnt) * 2
+	response.data = data
+
+	return response
 }
 
 func handleTCPRequest(conn net.Conn) {
@@ -174,25 +192,25 @@ func handleTCPRequest(conn net.Conn) {
 	reqHeader := parseHeader(arrHeader)
 	reqBody := sliceBody(bufReq, reqHeader.leng)
 
-	var bufResp []byte
+	//var bufResp []byte
 
 	switch reqHeader.metd {
 	case CMD_PERSET_M_REG:
 		persetMReg := parsePersetMReg(reqHeader, reqBody)
 		response := handlePersetMReg(persetMReg)
-		bufResp = serilizePersetMReg(response)
+		conn.Write(serilizePersetMReg(response))
 	case CMD_READ_HOL_REG:
-		persetMReg := parsePersetMReg(reqHeader, reqBody)
-		response := handlePersetMReg(persetMReg)
-		bufResp = serilizePersetMReg(response)
+		readHReg := parseReadHReg(reqHeader, reqBody)
+		response := handleReadHReg(readHReg)
+		conn.Write(serializeReadHReg(response))
 	default:
 		fmt.Println("Unknown MODBus method")
 	}
 
-	conn.Write(bufResp)
+	//conn.Write(bufResp)
 
-	fmt.Println(Storage)
-	fmt.Println(Timeouts)
+	//fmt.Println(Storage)
+	//fmt.Println(Timeouts)
 
 	conn.Close()
 }
