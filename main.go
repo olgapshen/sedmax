@@ -21,6 +21,8 @@ const (
 
 	CMD_PERSET_M_REG = 0x10
 	CMD_READ_HOL_REG = 0x03
+
+	ERR_READ_FAILED = 2
 )
 
 var Storage map[int16]int16
@@ -130,8 +132,13 @@ func parseReadHReg(header PDUHeader, buf []byte) RequestReadHReg {
 func serializeReadHReg(resp ResponseReadHReg) []byte {
 	buf := make([]byte, HEADER_LENGTH+1+resp.leng)
 	copy(buf, serializeHeader(resp.head))
-	buf[HEADER_LENGTH] = resp.leng
-	copy(buf[HEADER_LENGTH+1:], resp.data)
+
+	if resp.leng > 0 {
+		buf[HEADER_LENGTH] = resp.leng
+		copy(buf[HEADER_LENGTH+1:], resp.data)
+	} else {
+		buf[HEADER_LENGTH] = resp.data[0]
+	}
 
 	return buf
 }
@@ -166,8 +173,11 @@ func handleReadHReg(request RequestReadHReg) ResponseReadHReg {
 		if ok {
 			splitBytes(data[i*2:], elem)
 		} else {
-			//response.head.metd |= 0x80
-			//response.data = make()
+			response.head.metd |= 0x80
+			response.leng = 0
+			response.data = make([]byte, 1)
+			response.data[0] = ERR_READ_FAILED
+			return response
 		}
 
 	}
