@@ -170,6 +170,14 @@ func handleReadHReg(request RequestReadHReg) ResponseReadHReg {
 	var i int16
 	for i = 0; i < request.rcnt; i++ {
 		elem, ok := Storage[i]
+
+		if ok {
+			seconds := time.Now().Sub(Timeouts[i]).Seconds()
+			if seconds > 2 {
+				ok = false
+			}
+		}
+
 		if ok {
 			splitBytes(data[i*2:], elem)
 		} else {
