@@ -1,16 +1,11 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"net"
 	"os"
 	"time"
-)
-
-const (
-	CONN_HOST = "localhost"
-	CONN_PORT = "1502"
-	CONN_TYPE = "tcp"
 )
 
 const (
@@ -25,6 +20,7 @@ const (
 	ERR_READ_FAILED = 2
 )
 
+var Timeout int
 var Storage map[int16]int16
 var Timeouts map[int16]time.Time
 
@@ -169,11 +165,12 @@ func handleReadHReg(request RequestReadHReg) ResponseReadHReg {
 
 	var i int16
 	for i = 0; i < request.rcnt; i++ {
-		elem, ok := Storage[i]
+		addr := request.addr + i
+		elem, ok := Storage[addr]
 
 		if ok {
-			seconds := time.Now().Sub(Timeouts[i]).Seconds()
-			if seconds > 2 {
+			seconds := time.Now().Sub(Timeouts[addr]).Seconds()
+			if int(seconds) > Timeout {
 				ok = false
 			}
 		}
@@ -230,14 +227,23 @@ func handleTCPRequest(conn net.Conn) {
 	//fmt.Println(Storage)
 	//fmt.Println(Timeouts)
 
-	conn.Close()
+	defer conn.Close()
 }
 
 func main() {
+	hostPtr := flag.String("host", "localhost", "Host to listen to")
+	portPtr := flag.Int("port", 1502, "ModBus port to run on")
+	timeoutPtr := flag.Int("timeout", 2, "Time the data to be expired (in seconds)")
+
+	flag.Parse()
+
 	Storage = make(map[int16]int16)
 	Timeouts = make(map[int16]time.Time)
 
-	l, err := net.Listen(CONN_TYPE, CONN_HOST+":"+CONN_PORT)
+	Timeout = *timeoutPtr
+	addr := fmt.Sprintf("%s:%d", *hostPtr, *portPtr)
+
+	l, err := net.Listen("tcp", addr)
 
 	if err != nil {
 		fmt.Println("Error listening:", err.Error())
@@ -245,7 +251,8 @@ func main() {
 	}
 
 	defer l.Close()
-	fmt.Println("Listening on " + CONN_HOST + ":" + CONN_PORT)
+	fmt.Printf("Listening on %s, timeout set to: %d\n", addr, Timeout)
+
 	for {
 		conn, err := l.Accept()
 
