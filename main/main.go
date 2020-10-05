@@ -275,8 +275,6 @@ func handleTCPRequest(conn net.Conn) {
 	}
 
 	conn.Write(responseData)
-
-	defer conn.Close()
 }
 
 func main() {
