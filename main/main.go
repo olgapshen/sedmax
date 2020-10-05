@@ -1,35 +1,32 @@
 package main
 
 import (
+	"../storage"
 	"flag"
 	"fmt"
 	"net"
 	"os"
-	"time"
 )
 
 const (
 	HEADER_LENGTH           = 8
 	HEADER_TAIL_LENGTH      = 2
-	RES_PERS_MREG_D_LENGTH  = 4 // Data
-	REQ_PERS_MREG_MD_LENGTH = 5 // Metadata
+	RES_PRES_MREG_D_LENGTH  = 4 // Data
+	REQ_PRES_MREG_MD_LENGTH = 5 // Metadata
 
-	CMD_PERSET_M_REG = 0x10
+	CMD_PRESET_M_REG = 0x10
 	CMD_READ_HOL_REG = 0x03
 
 	ERR_READ_FAILED = 2
+	ERR_UNKNOWN     = 100
 )
-
-var Timeout int
-var Storage map[int16]int16
-var Timeouts map[int16]time.Time
 
 type PDUHeader struct {
 	txid int16
 	prid int16
 	leng int16
 	addr byte
-	metd byte
+	metd byte // Method
 }
 
 type RequestPresetMReg struct {
@@ -103,13 +100,13 @@ func parsePersetMReg(header PDUHeader, buf []byte) RequestPresetMReg {
 	request.addr = joinBytes(buf[0:])
 	request.rcnt = joinBytes(buf[2:])
 	request.leng = buf[4]
-	request.data = buf[REQ_PERS_MREG_MD_LENGTH : request.leng+REQ_PERS_MREG_MD_LENGTH]
+	request.data = buf[REQ_PRES_MREG_MD_LENGTH : request.leng+REQ_PRES_MREG_MD_LENGTH]
 
 	return request
 }
 
 func serilizePersetMReg(resp ResponsePresetMReg) []byte {
-	buf := make([]byte, HEADER_LENGTH+RES_PERS_MREG_D_LENGTH)
+	buf := make([]byte, HEADER_LENGTH+RES_PRES_MREG_D_LENGTH)
 	copy(buf, serializeHeader(resp.head))
 	splitBytes(buf[8:], resp.addr)
 	splitBytes(buf[10:], resp.amnt)
@@ -139,16 +136,22 @@ func serializeReadHReg(resp ResponseReadHReg) []byte {
 	return buf
 }
 
+func setResponseError(response ResponseReadHReg, err byte) {
+	response.head.metd |= 0x80
+	response.leng = 0
+	response.data = make([]byte, 1)
+	response.data[0] = err
+}
+
 func handlePersetMReg(request RequestPresetMReg) ResponsePresetMReg {
 	var response ResponsePresetMReg
 	response.head = request.head
-	response.head.leng = HEADER_TAIL_LENGTH + RES_PERS_MREG_D_LENGTH
+	response.head.leng = HEADER_TAIL_LENGTH + RES_PRES_MREG_D_LENGTH
 
 	var i int16
 	for i = 0; i < request.rcnt; i++ {
 		addr := request.addr + i
-		Storage[addr] = joinBytes(request.data[i*2:])
-		Timeouts[addr] = time.Now()
+		storage.StoreValue(addr, joinBytes(request.data[i*2:]))
 	}
 
 	response.addr = request.addr
@@ -163,28 +166,23 @@ func handleReadHReg(request RequestReadHReg) ResponseReadHReg {
 	response.head.leng = HEADER_TAIL_LENGTH + 1
 	var data = make([]byte, request.rcnt*2)
 
-	var i int16
-	for i = 0; i < request.rcnt; i++ {
+	for i := int16(0); i < request.rcnt; i++ {
 		addr := request.addr + i
-		elem, ok := Storage[addr]
+		status, elem := storage.GetValue(addr)
 
-		if ok {
-			seconds := time.Now().Sub(Timeouts[addr]).Seconds()
-			if int(seconds) > Timeout {
-				ok = false
-			}
-		}
-
-		if ok {
+		switch status {
+		case storage.E_EMPTY:
+			setResponseError(response, ERR_READ_FAILED)
+			return response
+		case storage.W_TIMEOUT:
+			setResponseError(response, ERR_READ_FAILED)
+			return response
+		case storage.S_OK:
 			splitBytes(data[i*2:], elem)
-		} else {
-			response.head.metd |= 0x80
-			response.leng = 0
-			response.data = make([]byte, 1)
-			response.data[0] = ERR_READ_FAILED
+		default:
+			setResponseError(response, ERR_UNKNOWN)
 			return response
 		}
-
 	}
 
 	response.head.leng += request.rcnt * 2
@@ -199,7 +197,7 @@ func handleTCPRequest(conn net.Conn) {
 	_, err := conn.Read(bufReq)
 
 	if err != nil {
-		fmt.Println("Error reading:", err.Error())
+		fmt.Println("Error reading: ", err.Error())
 		return
 	}
 
@@ -207,10 +205,8 @@ func handleTCPRequest(conn net.Conn) {
 	reqHeader := parseHeader(arrHeader)
 	reqBody := sliceBody(bufReq, reqHeader.leng)
 
-	//var bufResp []byte
-
 	switch reqHeader.metd {
-	case CMD_PERSET_M_REG:
+	case CMD_PRESET_M_REG:
 		persetMReg := parsePersetMReg(reqHeader, reqBody)
 		response := handlePersetMReg(persetMReg)
 		conn.Write(serilizePersetMReg(response))
@@ -219,13 +215,8 @@ func handleTCPRequest(conn net.Conn) {
 		response := handleReadHReg(readHReg)
 		conn.Write(serializeReadHReg(response))
 	default:
-		fmt.Println("Unknown MODBus method")
+		fmt.Println("Unhandled MODBus method: ", reqHeader.metd)
 	}
-
-	//conn.Write(bufResp)
-
-	//fmt.Println(Storage)
-	//fmt.Println(Timeouts)
 
 	defer conn.Close()
 }
@@ -233,14 +224,11 @@ func handleTCPRequest(conn net.Conn) {
 func main() {
 	hostPtr := flag.String("host", "localhost", "Host to listen to")
 	portPtr := flag.Int("port", 1502, "ModBus port to run on")
-	timeoutPtr := flag.Int("timeout", 2, "Time the data to be expired (in seconds)")
+	timeoutPtr := flag.Int64("timeout", 2, "Time the data to be expired (in seconds)")
 
 	flag.Parse()
 
-	Storage = make(map[int16]int16)
-	Timeouts = make(map[int16]time.Time)
-
-	Timeout = *timeoutPtr
+	storage.SetTimeout(*timeoutPtr)
 	addr := fmt.Sprintf("%s:%d", *hostPtr, *portPtr)
 
 	l, err := net.Listen("tcp", addr)
@@ -251,7 +239,7 @@ func main() {
 	}
 
 	defer l.Close()
-	fmt.Printf("Listening on %s, timeout set to: %d\n", addr, Timeout)
+	fmt.Printf("Listening on %s, timeout set to: %d\n", addr, storage.GetTimeout())
 
 	for {
 		conn, err := l.Accept()
