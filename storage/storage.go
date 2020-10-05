@@ -44,8 +44,8 @@ func GetValue(addr int16) (byte, int16) {
 	elem, ok := m_storage[addr]
 
 	if ok {
-		seconds := time.Now().Sub(m_timeouts[addr]).Seconds()
-		if int64(seconds) > m_timeout {
+		mill := time.Now().Sub(m_timeouts[addr]).Milliseconds()
+		if int64(mill) > m_timeout*1000 {
 			return W_TIMEOUT, elem
 		} else {
 			return S_OK, elem
