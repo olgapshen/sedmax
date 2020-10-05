@@ -77,8 +77,12 @@ func sliceHeader(pkg []byte) []byte {
 	return pkg[0:HEADER_LENGTH]
 }
 
+func validateBody(header PDUHeader, len int) bool {
+	return int16(len) == header.leng+HEADER_LENGTH-2
+}
+
 func sliceBody(pkg []byte, dataLength int16) []byte {
-	return pkg[HEADER_LENGTH : dataLength+HEADER_LENGTH]
+	return pkg[HEADER_LENGTH : dataLength+HEADER_LENGTH-1]
 }
 
 func parseHeader(buf []byte) PDUHeader {
@@ -207,10 +211,10 @@ func handleReadHReg(header PDUHeader, buf []byte) (byte, []byte) {
 
 		switch status {
 		case storage.E_EMPTY:
-			code = storage.E_EMPTY
+			code = ERR_READ_FAILED
 			break
 		case storage.W_TIMEOUT:
-			code = storage.W_TIMEOUT
+			code = ERR_READ_FAILED
 			break
 		case storage.S_OK:
 			splitBytes(data[i*2:], elem)
@@ -228,16 +232,10 @@ func handleReadHReg(header PDUHeader, buf []byte) (byte, []byte) {
 		response.data = data
 		resultData = serializeReadHReg(response)
 	} else {
-		respErr := getErrorResponse(response.head, code)
-		resultData = serializeErrorResponse(respErr)
-
+		resultData = make([]byte, 0)
 	}
 
-	return S_OK, resultData
-}
-
-func validateBody(header PDUHeader, len int) bool {
-	return int16(len) == header.leng+HEADER_LENGTH
+	return code, resultData
 }
 
 func handleTCPRequest(conn net.Conn) {
@@ -268,8 +266,7 @@ func handleTCPRequest(conn net.Conn) {
 	case CMD_READ_HOL_REG:
 		code, responseData = handleReadHReg(reqHeader, reqBody)
 	default:
-		errResp := getErrorResponse(reqHeader, ERR_ILLEGAL_FUNCTION)
-		responseData = serializeErrorResponse(errResp)
+		code = ERR_ILLEGAL_FUNCTION
 	}
 
 	if code != S_OK {
