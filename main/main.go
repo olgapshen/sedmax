@@ -17,10 +17,11 @@ const (
 	CMD_PRESET_M_REG = 0x10
 	CMD_READ_HOL_REG = 0x03
 
-	S_OK = 0x00
+	S_OK = 0
 
 	ERR_ILLEGAL_FUNCTION = 0x01
 	ERR_READ_FAILED      = 0x02
+	ERR_JUNC             = 0xFE
 	ERR_UNKNOWN          = 0xFF
 )
 
@@ -102,15 +103,19 @@ func serializeHeader(header PDUHeader) []byte {
 	return buf
 }
 
-func parsePersetMReg(header PDUHeader, buf []byte) RequestPresetMReg {
+func parsePersetMReg(header PDUHeader, buf []byte) (byte, RequestPresetMReg) {
 	var request RequestPresetMReg
 	request.head = header
 	request.addr = joinBytes(buf[0:])
 	request.rcnt = joinBytes(buf[2:])
 	request.leng = buf[4]
-	request.data = buf[REQ_PRES_MREG_MD_LENGTH : request.leng+REQ_PRES_MREG_MD_LENGTH]
 
-	return request
+	if request.addr >= 0 && request.rcnt > 0 && request.leng > 0 {
+		request.data = buf[REQ_PRES_MREG_MD_LENGTH : request.leng+REQ_PRES_MREG_MD_LENGTH]
+		return S_OK, request
+	} else {
+		return ERR_JUNC, request
+	}
 }
 
 func serilizePersetMReg(resp ResponsePresetMReg) []byte {
@@ -122,12 +127,17 @@ func serilizePersetMReg(resp ResponsePresetMReg) []byte {
 	return buf
 }
 
-func parseReadHReg(header PDUHeader, buf []byte) RequestReadHReg {
+func parseReadHReg(header PDUHeader, buf []byte) (byte, RequestReadHReg) {
 	var request RequestReadHReg
 	request.head = header
 	request.addr = joinBytes(buf[0:])
 	request.rcnt = joinBytes(buf[2:])
-	return request
+
+	if request.addr >= 0 && request.rcnt > 0 {
+		return S_OK, request
+	} else {
+		return ERR_JUNC, request
+	}
 }
 
 func serializeReadHReg(resp ResponseReadHReg) []byte {
@@ -157,8 +167,12 @@ func getErrorResponse(header PDUHeader, err byte) ResponseError {
 	return response
 }
 
-func handlePersetMReg(header PDUHeader, buf []byte) []byte {
-	request := parsePersetMReg(header, buf)
+func handlePersetMReg(header PDUHeader, buf []byte) (byte, []byte) {
+	code, request := parsePersetMReg(header, buf)
+
+	if code != S_OK {
+		return code, make([]byte, 0)
+	}
 
 	var response ResponsePresetMReg
 	response.head = request.head
@@ -172,17 +186,20 @@ func handlePersetMReg(header PDUHeader, buf []byte) []byte {
 	response.addr = request.addr
 	response.amnt = request.rcnt
 
-	return serilizePersetMReg(response)
+	return S_OK, serilizePersetMReg(response)
 }
 
-func handleReadHReg(header PDUHeader, buf []byte) []byte {
-	request := parseReadHReg(header, buf)
+func handleReadHReg(header PDUHeader, buf []byte) (byte, []byte) {
+	code, request := parseReadHReg(header, buf)
+
+	if code != S_OK {
+		return code, make([]byte, 0)
+	}
 
 	var response ResponseReadHReg
 	response.head = request.head
 	response.head.leng = HEADER_TAIL_LENGTH + 1
 	data := make([]byte, request.rcnt*2)
-	code := byte(S_OK)
 
 	for i := int16(0); i < request.rcnt; i++ {
 		addr := request.addr + i
@@ -216,30 +233,47 @@ func handleReadHReg(header PDUHeader, buf []byte) []byte {
 
 	}
 
-	return resultData
+	return S_OK, resultData
+}
+
+func validateBody(header PDUHeader, len int) bool {
+	return int16(len) == header.leng+HEADER_LENGTH
 }
 
 func handleTCPRequest(conn net.Conn) {
 	bufReq := make([]byte, 1024)
-	_, err := conn.Read(bufReq)
+	len, err := conn.Read(bufReq)
 
 	if err != nil {
 		fmt.Println("Error reading: ", err.Error())
+		return
+	} else if len <= HEADER_LENGTH {
+		fmt.Println("Too small packet for header: ", len)
 		return
 	}
 
 	arrHeader := sliceHeader(bufReq)
 	reqHeader := parseHeader(arrHeader)
+	if !validateBody(reqHeader, len) {
+		fmt.Println("Too small packet for body: ", len)
+		return
+	}
+
 	reqBody := sliceBody(bufReq, reqHeader.leng)
 	var responseData []byte
-
+	var code byte
 	switch reqHeader.metd {
 	case CMD_PRESET_M_REG:
-		responseData = handlePersetMReg(reqHeader, reqBody)
+		code, responseData = handlePersetMReg(reqHeader, reqBody)
 	case CMD_READ_HOL_REG:
-		responseData = handleReadHReg(reqHeader, reqBody)
+		code, responseData = handleReadHReg(reqHeader, reqBody)
 	default:
 		errResp := getErrorResponse(reqHeader, ERR_ILLEGAL_FUNCTION)
+		responseData = serializeErrorResponse(errResp)
+	}
+
+	if code != S_OK {
+		errResp := getErrorResponse(reqHeader, code)
 		responseData = serializeErrorResponse(errResp)
 	}
 
@@ -259,13 +293,13 @@ func main() {
 	addr := fmt.Sprintf("%s:%d", *hostPtr, *portPtr)
 
 	l, err := net.Listen("tcp", addr)
+	defer l.Close()
 
 	if err != nil {
 		fmt.Println("Error listening:", err.Error())
 		os.Exit(1)
 	}
 
-	defer l.Close()
 	fmt.Printf("Listening on %s, timeout set to: %d\n", addr, storage.GetTimeout())
 
 	for {
