@@ -136,7 +136,7 @@ func serializeReadHReg(resp ResponseReadHReg) []byte {
 	return buf
 }
 
-func setResponseError(response ResponseReadHReg, err byte) {
+func setResponseError(response *ResponseReadHReg, err byte) {
 	response.head.metd |= 0x80
 	response.leng = 0
 	response.data = make([]byte, 1)
@@ -148,8 +148,7 @@ func handlePersetMReg(request RequestPresetMReg) ResponsePresetMReg {
 	response.head = request.head
 	response.head.leng = HEADER_TAIL_LENGTH + RES_PRES_MREG_D_LENGTH
 
-	var i int16
-	for i = 0; i < request.rcnt; i++ {
+	for i := int16(0); i < request.rcnt; i++ {
 		addr := request.addr + i
 		storage.StoreValue(addr, joinBytes(request.data[i*2:]))
 	}
@@ -172,15 +171,15 @@ func handleReadHReg(request RequestReadHReg) ResponseReadHReg {
 
 		switch status {
 		case storage.E_EMPTY:
-			setResponseError(response, ERR_READ_FAILED)
+			setResponseError(&response, ERR_READ_FAILED)
 			return response
 		case storage.W_TIMEOUT:
-			setResponseError(response, ERR_READ_FAILED)
+			setResponseError(&response, ERR_READ_FAILED)
 			return response
 		case storage.S_OK:
 			splitBytes(data[i*2:], elem)
 		default:
-			setResponseError(response, ERR_UNKNOWN)
+			setResponseError(&response, ERR_UNKNOWN)
 			return response
 		}
 	}

@@ -24,7 +24,7 @@ func TestParseHeader(t *testing.T) {
 		t.Error("Bad device address")
 	}
 
-	if header.metd != CMD_PERSET_M_REG {
+	if header.metd != CMD_PRESET_M_REG {
 		t.Error("Bad command")
 	}
 }
