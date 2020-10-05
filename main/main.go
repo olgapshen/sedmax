@@ -17,8 +17,11 @@ const (
 	CMD_PRESET_M_REG = 0x10
 	CMD_READ_HOL_REG = 0x03
 
-	ERR_READ_FAILED = 2
-	ERR_UNKNOWN     = 100
+	S_OK = 0x00
+
+	ERR_ILLEGAL_FUNCTION = 0x01
+	ERR_READ_FAILED      = 0x02
+	ERR_UNKNOWN          = 0xFF
 )
 
 type PDUHeader struct {
@@ -53,6 +56,11 @@ type ResponseReadHReg struct {
 	head PDUHeader
 	leng byte
 	data []byte
+}
+
+type ResponseError struct {
+	head PDUHeader
+	code byte
 }
 
 func joinBytes(buf []byte) int16 {
@@ -126,24 +134,32 @@ func serializeReadHReg(resp ResponseReadHReg) []byte {
 	buf := make([]byte, HEADER_LENGTH+1+resp.leng)
 	copy(buf, serializeHeader(resp.head))
 
-	if resp.leng > 0 {
-		buf[HEADER_LENGTH] = resp.leng
-		copy(buf[HEADER_LENGTH+1:], resp.data)
-	} else {
-		buf[HEADER_LENGTH] = resp.data[0]
-	}
+	buf[HEADER_LENGTH] = resp.leng
+	copy(buf[HEADER_LENGTH+1:], resp.data)
 
 	return buf
 }
 
-func setResponseError(response *ResponseReadHReg, err byte) {
-	response.head.metd |= 0x80
-	response.leng = 0
-	response.data = make([]byte, 1)
-	response.data[0] = err
+func serializeErrorResponse(response ResponseError) []byte {
+	buf := make([]byte, HEADER_LENGTH+1)
+	copy(buf, serializeHeader(response.head))
+	buf[HEADER_LENGTH] = response.code
+
+	return buf
 }
 
-func handlePersetMReg(request RequestPresetMReg) ResponsePresetMReg {
+func getErrorResponse(header PDUHeader, err byte) ResponseError {
+	var response ResponseError
+	response.head = header
+	response.head.metd |= 0x80
+	response.code = err
+
+	return response
+}
+
+func handlePersetMReg(header PDUHeader, buf []byte) []byte {
+	request := parsePersetMReg(header, buf)
+
 	var response ResponsePresetMReg
 	response.head = request.head
 	response.head.leng = HEADER_TAIL_LENGTH + RES_PRES_MREG_D_LENGTH
@@ -156,14 +172,17 @@ func handlePersetMReg(request RequestPresetMReg) ResponsePresetMReg {
 	response.addr = request.addr
 	response.amnt = request.rcnt
 
-	return response
+	return serilizePersetMReg(response)
 }
 
-func handleReadHReg(request RequestReadHReg) ResponseReadHReg {
+func handleReadHReg(header PDUHeader, buf []byte) []byte {
+	request := parseReadHReg(header, buf)
+
 	var response ResponseReadHReg
 	response.head = request.head
 	response.head.leng = HEADER_TAIL_LENGTH + 1
-	var data = make([]byte, request.rcnt*2)
+	data := make([]byte, request.rcnt*2)
+	code := byte(S_OK)
 
 	for i := int16(0); i < request.rcnt; i++ {
 		addr := request.addr + i
@@ -171,24 +190,33 @@ func handleReadHReg(request RequestReadHReg) ResponseReadHReg {
 
 		switch status {
 		case storage.E_EMPTY:
-			setResponseError(&response, ERR_READ_FAILED)
-			return response
+			code = storage.E_EMPTY
+			break
 		case storage.W_TIMEOUT:
-			setResponseError(&response, ERR_READ_FAILED)
-			return response
+			code = storage.W_TIMEOUT
+			break
 		case storage.S_OK:
 			splitBytes(data[i*2:], elem)
 		default:
-			setResponseError(&response, ERR_UNKNOWN)
-			return response
+			code = ERR_UNKNOWN
+			break
 		}
 	}
 
-	response.head.leng += request.rcnt * 2
-	response.leng = byte(request.rcnt) * 2
-	response.data = data
+	var resultData []byte
 
-	return response
+	if code == S_OK {
+		response.head.leng += request.rcnt * 2
+		response.leng = byte(request.rcnt) * 2
+		response.data = data
+		resultData = serializeReadHReg(response)
+	} else {
+		respErr := getErrorResponse(response.head, code)
+		resultData = serializeErrorResponse(respErr)
+
+	}
+
+	return resultData
 }
 
 func handleTCPRequest(conn net.Conn) {
@@ -203,19 +231,19 @@ func handleTCPRequest(conn net.Conn) {
 	arrHeader := sliceHeader(bufReq)
 	reqHeader := parseHeader(arrHeader)
 	reqBody := sliceBody(bufReq, reqHeader.leng)
+	var responseData []byte
 
 	switch reqHeader.metd {
 	case CMD_PRESET_M_REG:
-		persetMReg := parsePersetMReg(reqHeader, reqBody)
-		response := handlePersetMReg(persetMReg)
-		conn.Write(serilizePersetMReg(response))
+		responseData = handlePersetMReg(reqHeader, reqBody)
 	case CMD_READ_HOL_REG:
-		readHReg := parseReadHReg(reqHeader, reqBody)
-		response := handleReadHReg(readHReg)
-		conn.Write(serializeReadHReg(response))
+		responseData = handleReadHReg(reqHeader, reqBody)
 	default:
-		fmt.Println("Unhandled MODBus method: ", reqHeader.metd)
+		errResp := getErrorResponse(reqHeader, ERR_ILLEGAL_FUNCTION)
+		responseData = serializeErrorResponse(errResp)
 	}
+
+	conn.Write(responseData)
 
 	defer conn.Close()
 }
